@@ -6,7 +6,8 @@ from hearthstone.enums import CardClass, CardType
 from fireplace.deck import Deck
 import copy
 import random
-from model import Model
+from model import CharacterSelectionModel
+from mcst_node import MCSTNode
 import torch
 
 def has_lethal(player, health_of_opponent):
@@ -60,39 +61,17 @@ def play_turn_random(game):
 	game.end_turn()
 	return game
 
+def mcst_simulation(game):
+	root = MCSTNode()
+	
+
 def play_turn_mcst(game):
 	player = game.current_player
-	opponent = get_opponent(game)
+	state = game_state(game)
+	model = CharacterSelectionModel()
 
-	characters = [] 
-
-	for character in player.characters:
-		print(vars(character))
-		characters.append(character.atk)
-		characters.append(character._max_health - character.damage)
-	
-	# Padding
-
-	if len(characters) < 16:
-		for i in range(0, 16-len(characters)):
-			characters.append(0)
-
-	for character in opponent.characters:
-		characters.append(float(character.atk))
-		characters.append(float(character._max_health - character.damage))
-
-	# Padding
-	if len(characters) < 32:
-		for i in range(0, 32-len(characters)):
-			characters.append(0)
-
-	state = torch.tensor(characters)
-
-	model = Model()
-
-	print(characters)
-	result = torch.argmax(model.forward(state))
-	print(result)
+	result = model.forward(state)
+	print(model.loss(result, 5))
 
 	while True:
 		# iterate over our hand and play whatever is playable
@@ -139,6 +118,33 @@ def simple_deck():
 			deck.append(card)
 	return deck
 
+def game_state(game):
+	player = game.current_player
+	opponent = get_opponent(game)
+	characters = []
+	player_entities = []
+
+	for character in player.characters:
+		characters.append(character.atk)
+		characters.append(character._max_health - character.damage)
+		player_entities.append(character)
+	
+	# Padding
+	if len(characters) < 16:
+		for i in range(0, 16-len(characters)):
+			characters.append(0)
+
+	for character in opponent.characters:
+		characters.append(float(character.atk))
+		characters.append(float(character._max_health - character.damage))
+
+	# Padding
+	if len(characters) < 32:
+		for i in range(0, 32-len(characters)):
+			characters.append(0)
+	
+	return torch.tensor(characters)
+
 def setup_game():
 	deck1 = simple_deck()
 	deck2 = simple_deck() #random_draft(CardClass.WARRIOR)
@@ -151,9 +157,10 @@ def setup_game():
 
 	return game
 
-cards.db.initialize()
-game = setup_game()
-try:
-    play_full_game(game)
-except GameOver:
-    print("Game completed normally.")
+if __name__ == "__main__":
+	cards.db.initialize()
+	game = setup_game()
+	try:
+		play_full_game(game)
+	except GameOver:
+		print("Game completed normally.")
