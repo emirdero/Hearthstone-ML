@@ -1,9 +1,9 @@
-from fireplace import cards, deck
-from fireplace.player import Player
-from fireplace.game import Game
-from fireplace.exceptions import GameOver
+from fireplace_modified.fireplace_modified import cards, deck
+from fireplace_modified.fireplace_modified.player import Player
+from fireplace_modified.fireplace_modified.game import Game
+from fireplace_modified.fireplace_modified.exceptions import GameOver
 from hearthstone.enums import CardClass, CardType
-from fireplace.deck import Deck
+from fireplace_modified.fireplace_modified.deck import Deck
 import copy
 import random
 from model import TargetSelectionModel
@@ -75,6 +75,13 @@ def play_turn_random(game):
 		return 0
 """
 
+def get_characters(game):
+	player = game.current_player
+	characters = []
+	for character in player.characters:
+		characters.append(character)
+	return characters
+
 def get_usable_characters(game):
 	player = game.current_player
 	usable_characters = []
@@ -84,13 +91,20 @@ def get_usable_characters(game):
 	return usable_characters
 
 # Returns best target for given character
-def mcst_simulation_best_move(game, character, character_index):
+def mcst_simulation_best_move(game, character_index):
 	root = MCSTNode(game)
 	root.character = character_index
-	targets = character.targets
+
+	for char in root.state.current_player.characters:
+		print(char)
+	print(character_index)
+
+	temp_root_character_copy = next(itertools.islice(root.state.current_player.characters, character_index, None))
+	targets = temp_root_character_copy.targets
+
 	# if there is only one target, the choice is easy
 	if len(targets) == 1:
-		return 1
+		return 0
 	
 	(wins, simulations) = mcst_add_childern_root(root, targets)
 	root.wins += wins
@@ -102,7 +116,7 @@ def mcst_simulation_best_move(game, character, character_index):
 	for i in range(0, 100):
 		# If current node is leaf
 		if len(current_node.children) == 0:
-			(wins, simulations) = mcst_add_childern(current_node, targets)
+			(wins, simulations) = mcst_add_childern(current_node)
 			# Update upwards
 			for node in path:
 				node.wins += wins
@@ -134,16 +148,23 @@ def mcst_simulation_best_move(game, character, character_index):
 
 def mcst_add_childern_root(node, targets):
 	total_wins = 0
-	for j in range(0, len(targets)):
+	for j in range(-1, len(targets)):
 		game_copy = copy.deepcopy(node.state)
 		player_copy = game_copy.current_player
 		character_copy = next(itertools.islice(player_copy.characters, node.character, None))
 		child_node = MCSTNode(game_copy)
 		targets_copy = character_copy.targets
-		target_copy = next(itertools.islice(targets_copy, j, None))
 
-		character_copy.attack(target_copy)
-		child_node.character = 1
+		if character_copy.can_attack() and j >= 0:
+			target_copy = next(itertools.islice(targets_copy, j, None))
+			character_copy.attack(target_copy)
+		
+		avalible_characters = get_characters(game_copy)
+		if len(avalible_characters) > node.character + 1:
+			child_node.character = node.character + 1
+		else:
+			child_node.character = 0
+
 		child_node.target = j
 		if current_player_wins(copy.deepcopy(game_copy)):
 			child_node.wins += 1
@@ -152,7 +173,7 @@ def mcst_add_childern_root(node, targets):
 		node.children.append(child_node)
 	return (total_wins, len(targets))
 
-def mcst_add_childern(node, targets):
+def mcst_add_childern(node):
 	# If there are no usable characters left we run a simulation another time
 	if node.character == 0:
 		win = current_player_wins(copy.deepcopy(node.state))
@@ -163,20 +184,25 @@ def mcst_add_childern(node, targets):
 		else:
 			return (0, 1)
 
+	temp_character_copy = next(itertools.islice(node.state.current_player.characters, node.character, None))
+	targets = temp_character_copy.targets
 	total_wins = 0
-	for j in range(0, len(targets)):
+	for j in range(-1, len(targets)):
 		game_copy = copy.deepcopy(node.state)
 		player_copy = game_copy.current_player
 		character_copy = next(itertools.islice(player_copy.characters, node.character, None))
 		child_node = MCSTNode(game_copy)
 		targets_copy = character_copy.targets
-		target_copy = next(itertools.islice(targets_copy, j, None))
 
-		character_copy.attack(target_copy)
-		usable_characters = get_usable_characters(child_node.state)
+		if character_copy.can_attack() and j >= 0:
+			target_copy = next(itertools.islice(targets_copy, j, None))
+			character_copy.attack(target_copy)
+		
+		avalible_characters = get_characters(game_copy)
 		character_index = 0
-		if len(usable_characters) != 0:
+		if len(avalible_characters) > node.character + 1:
 			character_index = node.character + 1
+
 		child_node.character = character_index
 		child_node.target = j
 		if current_player_wins(copy.deepcopy(game_copy)):
@@ -209,15 +235,21 @@ def play_turn_mcst(game, model):
 
 		# Randomly attack with whatever can attack
 		for (i, character) in enumerate(player.characters):
+			turn_recap = []
 			if character.can_attack():
-				best_target = mcst_simulation_best_move(game, character, i)
-				print("Best target: ", best_target)
+				best_target = mcst_simulation_best_move(copy.deepcopy(game), i)
+				#print("Best target: ", best_target)
+				if best_target == -1:
+					print(character, " dosen't attack")
 				for (j, target) in enumerate(character.targets):
 					if j == best_target:
 						character.attack(target)
+						turn_recap.append([character, target])
 						result = model.forward(state)
-						print(model.loss(result, best_target))
+						#print(model.loss(result, best_target))
 						break
+			for action in  turn_recap:
+				print(action[0], " attacks ", action[1])
 		break
 
 	game.end_turn()
@@ -236,7 +268,7 @@ def play_full_game(game, model):
 	return game
 
 def simple_deck():
-	cards = ["CS2_182", "CS2_200", "CS2_231", "CS2_168", "CS2_172", "CS2_120", "CS2_118", "CS2_186", "DRG_239", "NEW1_021", "EX1_096", "EX1_007", "CS2_119", "BT_728"]
+	cards = ["CS2_182", "CS2_200", "CS2_231", "CS2_168", "CS2_172", "CS2_120", "CS2_118", "CS2_186", "DRG_239", "NEW1_021", "EX1_522", "EX1_007", "CS2_119", "BT_728"]
 	deck = []
 	for card in cards:
 		for i in range(0, 2):
