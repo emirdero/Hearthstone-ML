@@ -2,9 +2,9 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-class CharacterSelectionModel(nn.Module):
+class TargetSelectionModel(nn.Module):
     def __init__(self):
-        super(Model, self).__init__()
+        super(TargetSelectionModel, self).__init__()
         self.dense1 = nn.Linear(32, 64)
         self.dense2 = nn.Linear(64, 128)
         self.dense3 = nn.Linear(128, 64)

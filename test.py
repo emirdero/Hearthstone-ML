@@ -6,9 +6,11 @@ from hearthstone.enums import CardClass, CardType
 from fireplace.deck import Deck
 import copy
 import random
-from model import CharacterSelectionModel
+from model import TargetSelectionModel
 from mcst_node import MCSTNode
 import torch
+import itertools
+import math
 
 def has_lethal(player, health_of_opponent):
 	total_attack_power = 0
@@ -27,12 +29,15 @@ def get_opponent(game):
 	return opponent
 	
 
-def who_wins(game):
+def current_player_wins(game):
+	original_player = game.current_player
 	player = game.current_player
 	opponent = get_opponent(game)
-	
-	if has_lethal(player, opponent.hero.health):
-		return player
+	while not has_lethal(player, opponent.hero.health):
+		game = play_turn_random(game)
+		player = game.current_player
+		opponent = get_opponent(game)
+	return player == original_player
 
 def play_turn_random(game):
 	player = game.current_player
@@ -60,18 +65,131 @@ def play_turn_random(game):
 
 	game.end_turn()
 	return game
+"""
+	player = game.current_player
+	usable_characters = []
+	for character in player.characters:
+		if character.can_attack():
+			usable_characters.append(character)
+	if len(usable_characters) == 0:
+		return 0
+"""
 
-def mcst_simulation(game):
-	root = MCSTNode()
+def get_usable_characters(game):
+	player = game.current_player
+	usable_characters = []
+	for character in player.characters:
+		if character.can_attack():
+			usable_characters.append(character)
+	return usable_characters
+
+# Returns best target for given character
+def mcst_simulation_best_move(game, character, character_index):
+	root = MCSTNode(game)
+	root.character = character_index
+	targets = character.targets
+	# if there is only one target, the choice is easy
+	if len(targets) == 1:
+		return 1
 	
+	(wins, simulations) = mcst_add_childern_root(root, targets)
+	root.wins += wins
+	root.number_of_simulations += simulations
 
-def play_turn_mcst(game):
+	# run simulations
+	current_node = root
+	path = [root]
+	for i in range(0, 100):
+		# If current node is leaf
+		if len(current_node.children) == 0:
+			(wins, simulations) = mcst_add_childern(current_node, targets)
+			# Update upwards
+			for node in path:
+				node.wins += wins
+				node.number_of_simulations += simulations
+			# Go back to top of tree
+			current_node = root 
+			path = [root]
+		
+		# else find best candidate
+		else:
+			best_so_far = None
+			best_score = 0
+			for child in current_node.children:
+				score = child.wins / child.number_of_simulations + math.sqrt(2*math.log1p(child.number_of_simulations)/root.number_of_simulations)
+				if score >= best_score:
+					best_score = score
+					best_so_far = child
+			current_node = best_so_far
+			path.append(current_node)
+
+	best_score = 0
+	best_child = None
+	for child in root.children:
+		score = child.wins / child.number_of_simulations
+		if score >= best_score:
+			best_score = score
+			best_child = child
+	return best_child.target
+
+def mcst_add_childern_root(node, targets):
+	total_wins = 0
+	for j in range(0, len(targets)):
+		game_copy = copy.deepcopy(node.state)
+		player_copy = game_copy.current_player
+		character_copy = next(itertools.islice(player_copy.characters, node.character, None))
+		child_node = MCSTNode(game_copy)
+		targets_copy = character_copy.targets
+		target_copy = next(itertools.islice(targets_copy, j, None))
+
+		character_copy.attack(target_copy)
+		child_node.character = 1
+		child_node.target = j
+		if current_player_wins(copy.deepcopy(game_copy)):
+			child_node.wins += 1
+			total_wins += 1
+		child_node.number_of_simulations = 1
+		node.children.append(child_node)
+	return (total_wins, len(targets))
+
+def mcst_add_childern(node, targets):
+	# If there are no usable characters left we run a simulation another time
+	if node.character == 0:
+		win = current_player_wins(copy.deepcopy(node.state))
+		node.number_of_simulations += 1
+		if win:
+			node.wins += 1
+			return (1, 1)
+		else:
+			return (0, 1)
+
+	total_wins = 0
+	for j in range(0, len(targets)):
+		game_copy = copy.deepcopy(node.state)
+		player_copy = game_copy.current_player
+		character_copy = next(itertools.islice(player_copy.characters, node.character, None))
+		child_node = MCSTNode(game_copy)
+		targets_copy = character_copy.targets
+		target_copy = next(itertools.islice(targets_copy, j, None))
+
+		character_copy.attack(target_copy)
+		usable_characters = get_usable_characters(child_node.state)
+		character_index = 0
+		if len(usable_characters) != 0:
+			character_index = node.character + 1
+		child_node.character = character_index
+		child_node.target = j
+		if current_player_wins(copy.deepcopy(game_copy)):
+			child_node.wins += 1
+			total_wins += 1
+		child_node.number_of_simulations = 1
+		node.children.append(child_node)
+	return (total_wins, len(targets))
+
+
+def play_turn_mcst(game, model):
 	player = game.current_player
 	state = game_state(game)
-	model = CharacterSelectionModel()
-
-	result = model.forward(state)
-	print(model.loss(result, 5))
 
 	while True:
 		# iterate over our hand and play whatever is playable
@@ -90,15 +208,22 @@ def play_turn_mcst(game):
 				continue
 
 		# Randomly attack with whatever can attack
-		for character in player.characters:
+		for (i, character) in enumerate(player.characters):
 			if character.can_attack():
-				character.attack(random.choice(character.targets))
+				best_target = mcst_simulation_best_move(game, character, i)
+				print("Best target: ", best_target)
+				for (j, target) in enumerate(character.targets):
+					if j == best_target:
+						character.attack(target)
+						result = model.forward(state)
+						print(model.loss(result, best_target))
+						break
 		break
 
 	game.end_turn()
 	return game
 
-def play_full_game(game):
+def play_full_game(game, model):
 	for player in game.players:
 		print("Can mulligan %r" % (player.choice.cards))
 		mull_count = random.randint(0, len(player.choice.cards))
@@ -106,7 +231,7 @@ def play_full_game(game):
 		player.choice.choose(*cards_to_mulligan)
 
 	while True:
-		play_turn_mcst(game)
+		play_turn_mcst(game, model)
 
 	return game
 
@@ -160,7 +285,8 @@ def setup_game():
 if __name__ == "__main__":
 	cards.db.initialize()
 	game = setup_game()
+	model = TargetSelectionModel()
 	try:
-		play_full_game(game)
+		play_full_game(game, model)
 	except GameOver:
 		print("Game completed normally.")
