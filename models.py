@@ -33,7 +33,7 @@ class TargetSelectionModel(nn.Module):
             normalized_output.append(normalized_value)
         return torch.tensor(normalized_output, requires_grad=True)
 
-class ChanceToWinModel(nn.Module):
+class ValueNettwork(nn.Module):
     def __init__(self):
         super(TargetSelectionModel, self).__init__()
         self.dense1 = nn.Linear(33, 64)
