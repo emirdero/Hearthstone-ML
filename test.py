@@ -248,7 +248,7 @@ def play_turn_mcst(game, model, optimizer):
 						character.attack(target)
 						#turn_recap.append([character, target])
 						result = model.forward(state)
-						# result is 0-8 and best_target is -1-7 so we add 1
+						# result is 0-9 and best_target is -1-8 so we add 1
 						model.loss(result, best_target + 1).backward()
 						optimizer.step()
 						optimizer.zero_grad()
@@ -326,11 +326,11 @@ if __name__ == "__main__":
 	model = TargetSelectionModel()
 	model.load_state_dict(torch.load(model_path))
 	model.eval()
-	optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-	#for i in range(0, 100):
-	try:
-		game = setup_game()
-		play_full_game(game, model, optimizer)
-	except GameOver:
-		print("Game completed normally.")
-		torch.save(model.state_dict(), model_path)
+	optimizer = torch.optim.Adam(model.parameters(), lr=0.1)
+	for i in range(0, 100):
+		try:
+			game = setup_game()
+			play_full_game(game, model, optimizer)
+		except GameOver:
+			print("Game completed normally.")
+			torch.save(model.state_dict(), model_path)
