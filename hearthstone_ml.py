@@ -12,6 +12,10 @@ import torch
 import itertools
 import math
 
+POLICY_MODEL_INFLUENCE = 0 #1/10
+VALUE_NETWORK_INFLUENCE = 0 #1/10
+
+# Simplified because of lack of spells and effects that can affect lethal
 def has_lethal(player, health_of_opponent):
 	total_attack_power = 0
 	for character in player.characters:
@@ -28,14 +32,18 @@ def get_opponent(game):
 			opponent = game_player
 	return opponent
 
+# Simulate rest of game untill one player wins
 def current_player_wins(game):
 	original_player = game.current_player
 	player = game.current_player
 	opponent = get_opponent(game)
-	while not has_lethal(player, opponent.hero.health):
-		game = play_turn_random(game)
-		player = game.current_player
-		opponent = get_opponent(game)
+	try:
+		while not has_lethal(player, opponent.hero.health):
+			game = play_turn_random(game)
+			player = game.current_player
+			opponent = get_opponent(game)
+	except GameOver:
+		return player == original_player
 	return player == original_player
 
 def play_turn_random(game):
@@ -64,15 +72,6 @@ def play_turn_random(game):
 
 	game.end_turn()
 	return game
-"""
-	player = game.current_player
-	usable_characters = []
-	for character in player.characters:
-		if character.can_attack():
-			usable_characters.append(character)
-	if len(usable_characters) == 0:
-		return 0
-"""
 
 def get_characters(game):
 	player = game.current_player
@@ -90,7 +89,7 @@ def get_usable_characters(game):
 	return usable_characters
 
 # Returns best target for given character
-def mcst_simulation_best_move(game, character_index):
+def mcst_simulation_best_move(game, character_index, policy_model, value_model):
 	root = MCSTNode(game)
 	root.character = character_index
 
@@ -99,7 +98,7 @@ def mcst_simulation_best_move(game, character_index):
 
 	# if there is only one target, the choice is easy
 	if len(targets) == 1:
-		return 0
+		return 0, -1
 	
 	(wins, simulations) = mcst_add_childern_root(root, targets)
 	root.wins += wins
@@ -110,7 +109,7 @@ def mcst_simulation_best_move(game, character_index):
 	# remeber path for score update later on
 	path = [root]
 	for i in range(0, 1000):
-		# If current node is leaf
+		# If current node is leaf, expand
 		if len(current_node.children) == 0:
 			(wins, simulations) = mcst_add_childern(current_node)
 			# Update upwards
@@ -121,12 +120,23 @@ def mcst_simulation_best_move(game, character_index):
 			current_node = root 
 			path = [root]
 		
-		# else find best candidate
+		# else explore best candidate
 		else:
 			best_so_far = None
 			best_score = 0
+			state = game_state(current_node.state, current_node.character)
+			optimal_target = torch.argmax(policy_model.forward(state))
+
 			for child in current_node.children:
-				score = child.wins / child.number_of_simulations + math.sqrt(2*math.log1p(child.number_of_simulations)/root.number_of_simulations)
+				# UCB formula
+				score = child.wins / child.number_of_simulations + math.sqrt(2*math.log1p(current_node.number_of_simulations)/child.number_of_simulations)
+
+				# Add machine learning
+				state = game_state(child.state, child.character)
+				score += value_model.forward(state)*VALUE_NETWORK_INFLUENCE
+				if child.target == optimal_target:
+					score += POLICY_MODEL_INFLUENCE
+
 				if score >= best_score:
 					best_score = score
 					best_so_far = child
@@ -140,7 +150,7 @@ def mcst_simulation_best_move(game, character_index):
 		if score >= best_score:
 			best_score = score
 			best_child = child
-	return best_child.target
+	return (best_child.target, best_score)
 
 def mcst_add_childern_root(node, targets):
 	total_wins = 0
@@ -209,9 +219,8 @@ def mcst_add_childern(node):
 	return (total_wins, len(targets))
 
 
-def play_turn_mcst(game, model, optimizer):
+def play_turn_mcst(game, policy_model, policy_optimizer, value_model, value_optimizer, training):
 	player = game.current_player
-	state = game_state(game)
 
 	while True:
 		# iterate over our hand and play whatever is playable
@@ -229,59 +238,85 @@ def play_turn_mcst(game, model, optimizer):
 					player.choice.choose(choice)
 				continue
 
+		states_and_moves = []
 		# Randomly attack with whatever can attack
 		for (i, character) in enumerate(player.characters):
-			#turn_recap = []
+			turn_recap = []
 			if character.can_attack():
 				# find characters index
 				character_index = 0
 				for (j, current_character) in enumerate(player.characters):
 					if character == current_character:
 						character_index = j
-				best_target = mcst_simulation_best_move(copy.deepcopy(game), character_index)
-				#print("Best target: ", best_target)
-				#if best_target == -1:
-					#print(character, " dosen't attack")
+				best_target, move_score = mcst_simulation_best_move(copy.deepcopy(game), character_index, policy_model, value_model)
+				print("Best target: ", best_target)
+				if best_target == -1:
+					print(character, " dosen't attack")
 				for (j, target) in enumerate(character.targets):
 					if j == best_target:
 						character.attack(target)
-						#turn_recap.append([character, target])
-						result = model.forward(state)
-						# result is 0-9 and best_target is -1-8 so we add 1
-						model.loss(result, best_target + 1).backward()
-						optimizer.step()
-						optimizer.zero_grad()
+						turn_recap.append([character, target])
+						# Train the models
+						if training:
+							state = game_state(game, character_index)
+							best_target_prediction = policy_model.forward(state)
+							policy_model.loss(best_target_prediction, best_target).backward()
+							policy_optimizer.step()
+							policy_optimizer.zero_grad()
+
+							if move_score != -1:
+								winning_chance_prediction = value_model.forward(state)
+								value_model.loss(winning_chance_prediction, move_score).backward()
+								value_optimizer.step()
+								value_optimizer.zero_grad()
 						break
-			'''
 			for action in  turn_recap:
 				print(action[0], " attacks ", action[1])
 				print()
-			'''
 		break
 
 	game.end_turn()
 	return game
 
-def play_full_game(game, model, optimizer):
+def play_full_game(game, policy_model, policy_optimizer, value_model, value_optimizer, training):
 	for player in game.players:
 		mull_count = random.randint(0, len(player.choice.cards))
 		cards_to_mulligan = random.sample(player.choice.cards, mull_count)
 		player.choice.choose(*cards_to_mulligan)
 
 	while True:
-		play_turn_mcst(game, model, optimizer)
+		play_turn_mcst(game, policy_model, policy_optimizer, value_model, value_optimizer, training)
+
+	return game
+
+def play_full_game_mcst_vs_random(game, policy_model, policy_optimizer, value_model, value_optimizer):
+	for player in game.players:
+		mull_count = random.randint(0, len(player.choice.cards))
+		cards_to_mulligan = random.sample(player.choice.cards, mull_count)
+		player.choice.choose(*cards_to_mulligan)
+
+	mcst_player = game.current_player
+	random_player = get_opponent(game)
+
+	while True:
+		if has_lethal(mcst_player, random_player.hero.health):
+			return True
+		play_turn_mcst(game, policy_model, policy_optimizer, value_model, value_optimizer, False)
+		if has_lethal(random_player, mcst_player.hero.health):
+			return False
+		play_turn_random()
 
 	return game
 
 def simple_deck():
-	cards = ["CS2_182", "CS2_200", "CS2_231", "CS2_168", "CS2_172", "CS2_120", "CS2_118", "CS2_186", "DRG_239", "NEW1_021", "EX1_522", "EX1_007", "CS2_119", "BT_728"]
+	cards = ["CS2_182", "CS2_200", "EX1_044", "CS2_168", "CS2_172", "CS2_120", "CS2_118", "CS2_186", "DRG_239", "NEW1_021", "EX1_522", "EX1_007", "CS2_119", "BT_728"]
 	deck = []
 	for card in cards:
 		for i in range(0, 2):
 			deck.append(card)
 	return deck
 
-def game_state(game):
+def game_state(game, character_index):
 	player = game.current_player
 	opponent = get_opponent(game)
 	characters = []
@@ -306,12 +341,15 @@ def game_state(game):
 		for i in range(0, 32-len(characters)):
 			characters.append(0)
 	
+	# Append index of current attacking character
+	characters.append(float(character_index))
+	
 	return torch.tensor(characters, requires_grad=True)
 
 def setup_game():
 	deck1 = simple_deck()
 	deck2 = simple_deck() #random_draft(CardClass.WARRIOR)
-	player1 = Player("Player1", deck1, CardClass.MAGE.default_hero)
+	player1 = Player("Player1", deck1, CardClass.WARRIOR.default_hero)
 	player2 = Player("Player2", deck2, CardClass.MAGE.default_hero)
 
 	game = Game(players=(player1, player2))
@@ -320,16 +358,29 @@ def setup_game():
 	return game
 
 if __name__ == "__main__":
-	model_path = "hs_state_dict_model.pt"
 	cards.db.initialize()
-	model = TargetSelectionModel()
-	model.load_state_dict(torch.load(model_path))
-	model.eval()
-	optimizer = torch.optim.Adam(model.parameters(), lr=0.1)
+	policy_model_path = "hs_state_dict_policy_model.pt"
+
+	training = True
+
+	# Get policy model with saved parameters
+	policy_model = TargetSelectionModel()
+	policy_model.load_state_dict(torch.load(policy_model_path))
+	policy_model.eval()
+
+	value_model_path = "hs_state_dict_value_model.pt"
+	# Get value nettwork model with saved parameters
+	value_model = ValueNettwork()
+	value_model.load_state_dict(torch.load(value_model_path))
+	value_model.eval()
+
+	policy_optimizer = torch.optim.Adam(policy_model.parameters(), lr=0.1)
+	value_optimizer = torch.optim.Adam(policy_model.parameters(), lr=0.1)
 	for i in range(0, 100):
 		try:
 			game = setup_game()
-			play_full_game(game, model, optimizer)
+			play_full_game(game, policy_model, policy_optimizer, value_model, value_optimizer, training)
 		except GameOver:
 			print("Game completed normally.")
-			torch.save(model.state_dict(), model_path)
+			torch.save(policy_model.state_dict(), policy_model_path)
+			torch.save(value_model.state_dict(), value_model_path)
